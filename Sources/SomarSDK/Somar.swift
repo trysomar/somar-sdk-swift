@@ -142,9 +142,24 @@ public enum Somar {
         enqueue("$screen", merged)
     }
 
-    /// Attach the person to a company/team/organisation.
+    /// Attach the person to a company/team/organisation. Subsequent events
+    /// carry the membership as a $groups super property, powering account
+    /// analytics.
     public static func group(_ type: String, _ key: String, _ props: [String: Any] = [:]) {
         enqueue("$group", ["$group_type": type, "$group_key": key, "$set": props])
+        var groups = (Session.superProperties["$groups"] as? [String: Any]) ?? [:]
+        groups[type] = key
+        Session.register(["$groups": groups])
+    }
+
+    /// Record an API call's outcome — powers API-latency and network-error
+    /// metrics. Call from your networking layer; pass the path, not the query.
+    public static func captureRequest(endpoint: String, method: String, statusCode: Int,
+                                      durationMs: Int, failed: Bool = false) {
+        enqueue("$api_request", [
+            "$endpoint": endpoint, "$method": method.uppercased(), "$status": statusCode,
+            "$duration_ms": durationMs, "$is_error": failed || statusCode >= 400,
+        ])
     }
 
     /// Record an error.
