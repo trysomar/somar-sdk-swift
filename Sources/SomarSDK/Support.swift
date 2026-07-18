@@ -83,6 +83,62 @@ enum Session {
     private static let defaults = UserDefaults.standard
     private static let lock = NSLock()
 
+    private static let superPropertiesKey = "somar_super_properties"
+    private static let optOutKey = "somar_opted_out"
+    private static let sessionStartedKey = "somar_session_started_at"
+    private static var trail: [String] = []
+
+    static var isOptedOut: Bool {
+        get { defaults.bool(forKey: optOutKey) }
+        set { defaults.set(newValue, forKey: optOutKey) }
+    }
+
+    static var superProperties: [String: Any] {
+        guard let data = defaults.data(forKey: superPropertiesKey),
+              let raw = try? JSONDecoder().decode([String: JSONValue].self, from: data) else { return [:] }
+        return raw.reduce(into: [String: Any]()) { out, item in
+            if let data = try? JSONEncoder().encode(item.value),
+               let value = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) { out[item.key] = value }
+        }
+    }
+
+    static func register(_ properties: [String: Any]) {
+        lock.lock(); defer { lock.unlock() }
+        var merged = superProperties
+        for (key, value) in properties { merged[key] = value }
+        if let data = try? JSONEncoder().encode(JSONValue.wrap(merged)) { defaults.set(data, forKey: superPropertiesKey) }
+    }
+
+    static func unregister(_ keys: [String]) {
+        lock.lock(); defer { lock.unlock() }
+        var merged = superProperties
+        for key in keys { merged.removeValue(forKey: key) }
+        if let data = try? JSONEncoder().encode(JSONValue.wrap(merged)) { defaults.set(data, forKey: superPropertiesKey) }
+    }
+
+    static var breadcrumbs: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return trail
+    }
+
+    /// Lock-free read for the crash handler (see lastKnownSessionID) — a torn
+    /// read is survivable there; a deadlock loses the crash report.
+    static var breadcrumbsUnsafe: [String] { trail }
+
+    static func addBreadcrumb(_ name: String) {
+        lock.lock(); defer { lock.unlock() }
+        trail.append(name)
+        if trail.count > 20 { trail.removeFirst(trail.count - 20) }
+    }
+
+    static var currentSessionDurationMs: Int {
+        max(0, Int((Date().timeIntervalSince1970 - defaults.double(forKey: sessionStartedKey)) * 1_000))
+    }
+
+    /// Lock-free snapshot for the crash handler — taking `lock` mid-crash
+    /// could deadlock if the crashing thread already holds it.
+    private(set) static var lastKnownSessionID: String = ""
+
     static func distinctID() -> String {
         lock.lock(); defer { lock.unlock() }
         if let id = defaults.string(forKey: "somar_distinct_id") { return id }
@@ -98,11 +154,14 @@ enum Session {
         let id = defaults.string(forKey: "somar_session_id")
         if let id, now.timeIntervalSince1970 - last < idleSeconds {
             defaults.set(now.timeIntervalSince1970, forKey: "somar_session_at")
+            lastKnownSessionID = id
             return id
         }
         let fresh = UUID().uuidString.lowercased()
         defaults.set(fresh, forKey: "somar_session_id")
         defaults.set(now.timeIntervalSince1970, forKey: "somar_session_at")
+        defaults.set(now.timeIntervalSince1970, forKey: sessionStartedKey)
+        lastKnownSessionID = fresh
         return fresh
     }
 
@@ -111,6 +170,10 @@ enum Session {
         defaults.removeObject(forKey: "somar_distinct_id")
         defaults.removeObject(forKey: "somar_session_id")
         defaults.removeObject(forKey: "somar_session_at")
+        defaults.removeObject(forKey: sessionStartedKey)
+        defaults.removeObject(forKey: superPropertiesKey)
+        defaults.removeObject(forKey: optOutKey)
+        trail.removeAll()
     }
 }
 
