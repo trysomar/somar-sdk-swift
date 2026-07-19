@@ -3,7 +3,7 @@ import XCTest
 
 /// The event contract (docs/event-contract.md): the sanitiser, the name
 /// normaliser, reset() semantics, and parity between the vendored constants
-/// and the canonical docs/event-contract.json at the monorepo root.
+/// and the canonical Somar/docs/event-contract.json.
 final class ContractTests: XCTestCase {
 
     override func setUp() {
@@ -81,9 +81,9 @@ final class ContractTests: XCTestCase {
             .deletingLastPathComponent()   // Tests
             .deletingLastPathComponent()   // somar-sdk-swift
         let canonical = packageRoot.deletingLastPathComponent()
-            .appendingPathComponent("docs/event-contract.json")
+            .appendingPathComponent("Somar/docs/event-contract.json")
         guard FileManager.default.fileExists(atPath: canonical.path) else {
-            throw XCTSkip("standalone checkout — no ../docs/event-contract.json")
+            throw XCTSkip("standalone checkout — no ../Somar/docs/event-contract.json")
         }
         let data = try Data(contentsOf: canonical)
         let doc = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
