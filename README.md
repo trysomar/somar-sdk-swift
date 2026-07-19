@@ -7,7 +7,7 @@ Send your app's events, sessions, errors, and feature-flag reads to your Somar w
 Add the package in Xcode (File → Add Package Dependencies) or in `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/somar/somar-sdk-swift", from: "0.1.0")
+.package(url: "https://github.com/trysomar/somar-sdk-swift", from: "0.4.0")
 ```
 
 ## Use
