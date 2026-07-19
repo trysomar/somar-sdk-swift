@@ -95,8 +95,22 @@ public enum Somar {
     }
 
     /// Name the current person. Anonymous history stitches to this id server-side.
+    /// Identifying a DIFFERENT user on this device first rotates the identity
+    /// (as reset() would) — the vendor-invariant that stops two people on one
+    /// device being merged into one person. Same user again is a no-op.
     public static func identify(_ userID: String, _ props: [String: Any] = [:]) {
+        if let previous = Session.identifiedAs, previous != userID {
+            reset()
+        }
+        Session.identifiedAs = userID
         enqueue("$identify", ["$user_id": userID, "$set": SomarContract.sanitise(props)])
+    }
+
+    /// Person profile properties: `props` overwrite ($set), `once` only fill
+    /// keys the person does not already have ($set_once).
+    public static func setPersonProperties(_ props: [String: Any], once: [String: Any] = [:]) {
+        enqueue("$set", ["$set": SomarContract.sanitise(props),
+                         "$set_once": SomarContract.sanitise(once)])
     }
 
     /// Record something the person did.

@@ -86,7 +86,18 @@ enum Session {
     private static let superPropertiesKey = "somar_super_properties"
     private static let optOutKey = "somar_opted_out"
     private static let sessionStartedKey = "somar_session_started_at"
+    private static let identifiedAsKey = "somar_identified_as"
     private static var trail: [String] = []
+
+    /// The user this device last identified as — drives the rotate-on-switch
+    /// safeguard in Somar.identify().
+    static var identifiedAs: String? {
+        get { defaults.string(forKey: identifiedAsKey) }
+        set {
+            if let newValue { defaults.set(newValue, forKey: identifiedAsKey) }
+            else { defaults.removeObject(forKey: identifiedAsKey) }
+        }
+    }
 
     static var isOptedOut: Bool {
         get { defaults.bool(forKey: optOutKey) }
@@ -172,6 +183,7 @@ enum Session {
         defaults.removeObject(forKey: "somar_session_at")
         defaults.removeObject(forKey: sessionStartedKey)
         defaults.removeObject(forKey: superPropertiesKey)
+        defaults.removeObject(forKey: identifiedAsKey)
         // Deliberately NOT cleared: the opt-out preference (contract §8) —
         // a privacy choice belongs to the device, not the account logging out.
         trail.removeAll()
