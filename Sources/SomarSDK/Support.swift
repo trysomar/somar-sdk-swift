@@ -199,8 +199,30 @@ final class EventQueue {
     private var events: [Event] = []
     private var timer: Timer?
     private var sending = false
+    private var attempt = 0
+    private var retryScheduled = false
     private let workQueue = DispatchQueue(label: "com.somar.sdk.queue")
     private let maxQueued = 500
+    private let baseBackoff: TimeInterval = 2
+    private let maxBackoff: TimeInterval = 60
+
+    /// What the server's answer means for this batch.
+    enum Delivery: Equatable {
+        case ok
+        case drop                       // 4xx — retrying re-sends identical bytes
+        case retry(after: TimeInterval?)
+    }
+
+    /// The retry policy, as a pure function so it can be tested without a
+    /// network (docs/ingestion.md — the response contract).
+    static func delivery(status: Int, failed: Bool, retryAfter: TimeInterval?) -> Delivery {
+        if failed { return .retry(after: nil) }              // offline
+        if (200...299).contains(status) { return .ok }
+        if status == 401 { return .ok }                      // bad key: stop hoarding
+        if status == 429 { return .retry(after: retryAfter) }
+        if (400...499).contains(status) { return .drop }     // permanent
+        return .retry(after: nil)                            // 5xx is ours to fix
+    }
 
     private var storeURL: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -285,25 +307,52 @@ final class EventQueue {
 
         URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
             guard let self else { return }
+            let http = response as? HTTPURLResponse
+            let outcome = Self.delivery(
+                status: http?.statusCode ?? 0,
+                failed: error != nil,
+                retryAfter: (http?.value(forHTTPHeaderField: "Retry-After")).flatMap(TimeInterval.init))
+
             self.workQueue.async {
                 self.sending = false
-                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                let delivered = error == nil && (200...299).contains(status)
-                if !delivered && status != 401 {
-                    // Network trouble or throttling: put the batch back for the
-                    // next flush. 401 (bad key) drops — retrying can't fix it.
+                switch outcome {
+                case .ok, .drop:
+                    self.attempt = 0
+                    self.persistLocked()
+                    if !self.events.isEmpty { self.flushLocked() }
+                case .retry(let after):
                     self.events.insert(contentsOf: batch, at: 0)
                     if self.events.count > self.maxQueued {
                         self.events.removeLast(self.events.count - self.maxQueued)
                     }
                     self.persistLocked()
-                } else if !self.events.isEmpty {
-                    self.flushLocked()
-                } else {
-                    self.persistLocked()
+                    self.scheduleRetryLocked(after: after)
                 }
             }
         }.resume()
+    }
+
+    /// Exponential backoff with jitter, or exactly what Retry-After asked for.
+    /// Without this a failed batch simply waited for the next natural flush —
+    /// and without jitter every client that went offline together returns in
+    /// the same instant.
+    private func scheduleRetryLocked(after: TimeInterval?) {
+        guard !retryScheduled else { return }
+        let delay: TimeInterval
+        if let after {
+            attempt = 0
+            delay = min(after, maxBackoff)
+        } else {
+            attempt += 1
+            let ceiling = min(baseBackoff * pow(2, Double(attempt - 1)), maxBackoff)
+            delay = ceiling / 2 + Double.random(in: 0...(ceiling / 2))
+        }
+        retryScheduled = true
+        workQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            self.retryScheduled = false
+            self.flushLocked()
+        }
     }
 }
 
