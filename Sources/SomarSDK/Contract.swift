@@ -33,6 +33,58 @@ enum SomarContract {
         print("[Somar] \(message)")
     }
 
+    // ── Debug ────────────────────────────────────────────────────────────────
+    // The SDK swallows every error by design — analytics must never break the
+    // host app. Swallowing SILENTLY makes integration problems invisible, so
+    // the debug flag is the seam: off (default) nothing is logged; on, every
+    // swallowed failure is reported. The ONLY channel for the SDK's own errors.
+    nonisolated(unsafe) private static var debugEnabled = false
+    static func setDebug(_ on: Bool) { debugEnabled = on }
+    static func debugLog(_ message: @autoclosure () -> String) {
+        guard debugEnabled else { return }
+        print("[Somar] \(message())")
+    }
+
+    /// Recursively redact any property whose KEY matches one of `keys`
+    /// (case-insensitive). Runs before `beforeSend`, so a hook sees masked data
+    /// too — masking is a floor, not something a hook can accidentally undo.
+    static func mask(_ value: Any, keys: [String], depth: Int = 0) -> Any {
+        guard !keys.isEmpty, depth < maxPropertyDepth else { return value }
+        if let dict = value as? [String: Any] {
+            var out: [String: Any] = [:]
+            for (k, v) in dict {
+                out[k] = keys.contains(where: { $0.caseInsensitiveCompare(k) == .orderedSame })
+                    ? "[masked]" : mask(v, keys: keys, depth: depth + 1)
+            }
+            return out
+        }
+        if let array = value as? [Any] {
+            return array.map { mask($0, keys: keys, depth: depth + 1) }
+        }
+        return value
+    }
+
+    /// The privacy pipeline for one event's properties: mask, then offer to
+    /// the hook. Returns nil when the hook vetoes. Pure — it takes the config
+    /// rather than reading global state, so it is testable directly and the
+    /// ordering guarantee (mask BEFORE hook) is a test, not a comment.
+    static func applyPrivacy(name: String, props: [String: Any], masked: [String],
+                             beforeSend: ((String, [String: Any]) -> [String: Any]?)?)
+        -> [String: Any]? {
+        var out = props
+        if !masked.isEmpty {
+            out = (mask(out, keys: masked) as? [String: Any]) ?? out
+        }
+        if let beforeSend {
+            guard let kept = beforeSend(name, out) else {
+                debugLog("beforeSend dropped \"\(name)\"")
+                return nil
+            }
+            out = kept
+        }
+        return out
+    }
+
     /// Contract §3: strip control chars, collapse whitespace, trim, cap at 200.
     /// Case- and separator-preserving — sdk.events.<name> metrics key on the
     /// exact name, so folding case would re-key customers' metrics.

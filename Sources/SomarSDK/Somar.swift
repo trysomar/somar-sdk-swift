@@ -19,7 +19,7 @@ import SwiftUI
 public enum Somar {
 
     static let defaultHost = URL(string: "https://dkdrkjndprldmthdkxxk.supabase.co/functions/v1/sdk-ingest")!
-    public static let version = "0.3.0"
+    public static let version = "0.4.0"
 
     /// Everything below is on by default; turn pieces off at initialize time.
     public struct Options {
@@ -31,12 +31,28 @@ public enum Somar {
         public var autoScreenViews = true
         /// Verified StoreKit transactions become purchase events with $revenue.
         public var captureStoreKitRevenue = true
+        /// Log everything the SDK swallows. Off by default; the only channel
+        /// through which the SDK reports its own failures.
+        public var debug = false
+        /// Property keys to redact anywhere in props/context, case-insensitive.
+        /// Applied before `beforeSend`, so masking cannot be undone by a hook.
+        public var mask: [String] = []
+        /// Last look at every event before it is queued: return the properties
+        /// to send (mutated or not), or nil to drop the event. Runs after
+        /// masking. If the hook is nil the event is sent unchanged.
+        ///
+        /// Swift closures cannot throw here by construction, which is the
+        /// point: the JS hook's failure mode (throw ⇒ drop) has no analogue,
+        /// so returning nil is the only way to veto.
+        public var beforeSend: ((_ event: String, _ properties: [String: Any]) -> [String: Any]?)?
 
         public init() {}
     }
 
     private static var queue: EventQueue?
     private static var flagsStore: FlagsStore?
+    private static var masked: [String] = []
+    private static var beforeSend: ((String, [String: Any]) -> [String: Any]?)?
     private static let stateLock = NSLock()
     private static let sdkLoadedAt = Date()
 
@@ -45,6 +61,9 @@ public enum Somar {
         stateLock.lock()
         defer { stateLock.unlock() }
         guard queue == nil else { return }
+        SomarContract.setDebug(options.debug)
+        masked = options.mask
+        beforeSend = options.beforeSend
         let config = Config(apiKey: apiKey, host: host ?? defaultHost)
         let newQueue = EventQueue(config: config)
         queue = newQueue
@@ -230,14 +249,25 @@ public enum Somar {
     static func enqueue(_ name: String, _ props: [String: Any]) {
         guard let queue, !Session.isOptedOut else { return }
         Session.addBreadcrumb(name)
+
+        let raw = Session.superProperties.merging(props) { _, newest in newest }
+        var ctx = Self.context()
+        if !masked.isEmpty {
+            ctx = (SomarContract.mask(ctx, keys: masked) as? [String: Any]) ?? ctx
+        }
+        // Mask, then offer to the hook — in that order, so a hook can never
+        // accidentally re-expose a field the customer asked to be redacted.
+        guard let merged = SomarContract.applyPrivacy(
+                name: name, props: raw, masked: masked, beforeSend: beforeSend) else { return }
+
         queue.add(Event(
             eventID: UUID().uuidString.lowercased(),
             name: name,
             distinctID: Session.distinctID(),
             sessionID: Session.sessionID(),
             ts: ISO8601DateFormatter().string(from: Date()),
-            props: JSONValue.wrap(Session.superProperties.merging(props) { _, newest in newest }),
-            context: JSONValue.wrap(Self.context())
+            props: JSONValue.wrap(merged),
+            context: JSONValue.wrap(ctx)
         ))
     }
 
