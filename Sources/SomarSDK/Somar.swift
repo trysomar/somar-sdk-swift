@@ -96,18 +96,30 @@ public enum Somar {
 
     /// Name the current person. Anonymous history stitches to this id server-side.
     public static func identify(_ userID: String, _ props: [String: Any] = [:]) {
-        enqueue("$identify", ["$user_id": userID, "$set": props])
+        enqueue("$identify", ["$user_id": userID, "$set": SomarContract.sanitise(props)])
     }
 
     /// Record something the person did.
     public static func capture(_ name: String, _ props: [String: Any] = [:]) {
-        enqueue(name, props)
+        // Contract §3/§4: the $ namespace is platform-only, and a name must
+        // survive normalisation. Both misuses drop the event with a one-time
+        // warning — they can never silently become a platform event.
+        if name.hasPrefix("$") {
+            SomarContract.warnOnce("event:\(name)", "\"\(name)\" was not sent — $-prefixed event names are reserved for Somar (see event-contract.md §3).")
+            return
+        }
+        let normalised = SomarContract.normaliseEventName(name)
+        if normalised.isEmpty {
+            SomarContract.warnOnce("event:empty", "capture() was called with an empty event name — nothing was sent.")
+            return
+        }
+        enqueue(normalised, SomarContract.sanitise(props))
     }
 
     /// Adds persistent properties to all future events, such as product tier or
     /// an experiment cohort. Use only non-sensitive values.
     public static func register(_ props: [String: Any]) {
-        Session.register(props)
+        Session.register(SomarContract.sanitise(props))
     }
 
     public static func unregister(_ keys: [String]) {
@@ -117,10 +129,12 @@ public enum Somar {
     /// Records revenue as product behaviour. This is what powers revenue,
     /// MRR and retention metrics; it is not tied to a Stripe connector.
     public static func captureRevenue(_ amount: Decimal, _ props: [String: Any] = [:]) {
-        var merged = props
+        // $revenue is added AFTER sanitisation so a props key can never spoof
+        // it; currency/plan are grandfathered unprefixed keys (contract §4).
+        var merged = SomarContract.sanitise(props)
         merged["$revenue"] = NSDecimalNumber(decimal: amount)
         if merged["currency"] == nil { merged["currency"] = "USD" }
-        capture("purchase", merged)
+        enqueue("purchase", merged)
     }
 
     /// Stops all capture on this device until optIn() is called. The preference
@@ -137,7 +151,7 @@ public enum Somar {
 
     /// A screen view — the app equivalent of a web page view.
     public static func screen(_ name: String, _ props: [String: Any] = [:]) {
-        var merged = props
+        var merged = SomarContract.sanitise(props)
         merged["$screen_name"] = name
         enqueue("$screen", merged)
     }
@@ -146,7 +160,7 @@ public enum Somar {
     /// carry the membership as a $groups super property, powering account
     /// analytics.
     public static func group(_ type: String, _ key: String, _ props: [String: Any] = [:]) {
-        enqueue("$group", ["$group_type": type, "$group_key": key, "$set": props])
+        enqueue("$group", ["$group_type": type, "$group_key": key, "$set": SomarContract.sanitise(props)])
         var groups = (Session.superProperties["$groups"] as? [String: Any]) ?? [:]
         groups[type] = key
         Session.register(["$groups": groups])
@@ -165,7 +179,7 @@ public enum Somar {
     /// Record an error.
     public static func captureError(_ error: Error, _ props: [String: Any] = [:]) {
         let ns = error as NSError
-        var merged = props
+        var merged = SomarContract.sanitise(props)
         merged["$message"] = ns.localizedDescription
         merged["$fingerprint"] = "\(ns.domain):\(ns.code)"
         merged["$stack"] = Thread.callStackSymbols.joined(separator: "\n").prefix(8_000).description
@@ -188,7 +202,10 @@ public enum Somar {
         queue?.flush()
     }
 
-    /// Forget this device's identity — call on logout.
+    /// Forget this device's identity — call on logout. Contract §8: rotates
+    /// distinct_id and session, clears super properties and flags; the opt-out
+    /// preference and queued events survive (privacy choices belong to the
+    /// device, queued events to the person who generated them).
     public static func reset() {
         Session.reset()
         flagsStore?.reset()

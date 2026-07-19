@@ -172,7 +172,8 @@ enum Session {
         defaults.removeObject(forKey: "somar_session_at")
         defaults.removeObject(forKey: sessionStartedKey)
         defaults.removeObject(forKey: superPropertiesKey)
-        defaults.removeObject(forKey: optOutKey)
+        // Deliberately NOT cleared: the opt-out preference (contract §8) —
+        // a privacy choice belongs to the device, not the account logging out.
         trail.removeAll()
     }
 }

@@ -112,7 +112,9 @@ extension UIViewController {
     @objc func somar_viewDidAppear(_ animated: Bool) {
         somar_viewDidAppear(animated)   // swizzled: calls the original
         if let name = ScreenViewAutoCapture.screenName(for: self), !name.isEmpty {
-            Somar.screen(name, ["$auto_captured": true])
+            // enqueue, not the public screen(): SDK-owned $ props would be
+            // stripped by the public sanitiser (contract §4).
+            Somar.enqueue("$screen", ["$screen_name": name, "$auto_captured": true])
         }
     }
 }
@@ -145,10 +147,11 @@ enum StoreKitRevenueObserver {
                         currency = transaction.currency?.identifier ?? "USD"
                     }
                     props["currency"] = currency
-                    Somar.captureRevenue(price, props)
-                } else {
-                    Somar.capture("purchase", props)
+                    props["$revenue"] = NSDecimalNumber(decimal: price)
                 }
+                // enqueue, not the public API: SDK-owned $ props ($product_id,
+                // $revenue…) would be stripped by the public sanitiser.
+                Somar.enqueue("purchase", props)
             }
         }
         #endif
