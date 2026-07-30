@@ -361,6 +361,10 @@ final class EventQueue {
 final class FlagsStore {
     struct Flag: Codable {
         let enabled: Bool
+        /// The assigned experiment arm, when this flag is multivariate. The
+        /// SERVER decides it — evaluation IS assignment — so every client
+        /// agrees and a person's arm is stable forever.
+        let variant: String?
         let payload: JSONValue?
     }
 
@@ -401,16 +405,43 @@ final class FlagsStore {
         }.resume()
     }
 
+    /// Test seam: install evaluated flags without a network round trip. The
+    /// flag path is otherwise only reachable through URLSession, which would
+    /// leave the arm-reporting logic — the part an experiment depends on —
+    /// untested.
+    func replaceForTesting(_ newFlags: [String: Flag]) {
+        lock.lock(); flags = newFlags; lock.unlock()
+    }
+
     func isEnabled(_ key: String) -> Bool {
+        read(key)?.enabled ?? false
+    }
+
+    /// The assigned arm of a multivariate flag, or nil for a boolean flag and
+    /// for a key that has not loaded.
+    func variant(_ key: String) -> String? {
+        read(key)?.variant
+    }
+
+    /// One read, one exposure. Both public accessors go through here so a
+    /// caller cannot check a flag twice and double-count the exposure, and so
+    /// the arm is reported no matter which accessor the app happens to use.
+    private func read(_ key: String) -> Flag? {
         lock.lock()
         let flag = flags[key]
         let firstRead = !exposuresSent.contains(key)
         if firstRead { exposuresSent.insert(key) }
         lock.unlock()
         if firstRead, let flag {
-            exposure("$feature_flag_called", ["$flag_key": key, "$flag_enabled": flag.enabled])
+            // $variant is what makes an experiment measurable:
+            // sdk_experiment_results reads it off this exact event. Omitted
+            // entirely for a boolean flag rather than sent as null, so the
+            // analysis can tell "not an experiment" from "arm unknown".
+            var props: [String: Any] = ["$flag_key": key, "$flag_enabled": flag.enabled]
+            if let variant = flag.variant { props["$variant"] = variant }
+            exposure("$feature_flag_called", props)
         }
-        return flag?.enabled ?? false
+        return flag
     }
 
     func payload(_ key: String) -> Any? {

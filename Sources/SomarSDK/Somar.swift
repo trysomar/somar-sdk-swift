@@ -18,7 +18,10 @@ import SwiftUI
 
 public enum Somar {
 
-    static let defaultHost = URL(string: "https://dkdrkjndprldmthdkxxk.supabase.co/functions/v1/sdk-ingest")!
+    /// The Go capture service — ingest lands there, /flags and /surveys pass
+    /// through to the edge function. Changed BEFORE launch deliberately: a
+    /// host baked into a shipped app must live forever (docs/ingest-cutover.md).
+    static let defaultHost = URL(string: "https://capture.trysomar.com")!
     public static let version = "0.4.0"
 
     /// Everything below is on by default; turn pieces off at initialize time.
@@ -223,6 +226,17 @@ public enum Somar {
     /// The evaluated flag. False before flags load / for unknown keys.
     public static func isEnabled(_ flagKey: String) -> Bool {
         flagsStore?.isEnabled(flagKey) ?? false
+    }
+
+    /// The assigned arm of a multivariate flag, e.g. "control" / "test".
+    ///
+    /// Returns nil for a plain boolean flag and for a key that has not loaded,
+    /// so branch with `== "test"` and let nil fall through to your default.
+    /// The arm is decided by the server at evaluation time and is stable for a
+    /// person forever — reading it here is what reports the exposure that an
+    /// experiment's results are computed from.
+    public static func featureFlagVariant(_ flagKey: String) -> String? {
+        flagsStore?.variant(flagKey)
     }
 
     /// The flag's payload, when the flag is on and carries one.
