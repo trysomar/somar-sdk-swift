@@ -384,6 +384,34 @@ final class FlagsStore {
         }
     }
 
+    /// ── THE PERSON, AS THIS DEVICE LAST DESCRIBED THEM ──────────────────────
+    ///
+    /// `setPersonProperties` enqueued a `$set` event and stopped there: the
+    /// properties reached the warehouse and never the flag call. So a cohort
+    /// could be stored and could never be evaluated, which is exactly why cohorts
+    /// were forbidden — "targeting that lies about who it targeted".
+    ///
+    /// This is NOT a second source of truth about the person. The server still
+    /// learns them from the `$set` event; nothing reads this except `/flags`.
+    private static let personKey = "somar_person_props"
+
+    /// Remembered so `/flags` can carry it. `once` fills only what is missing,
+    /// matching `$set_once`'s meaning — so the local mirror agrees with what the
+    /// server computes rather than following a second, simpler rule.
+    static func rememberPersonProperties(_ props: [String: Any], once: [String: Any]) {
+        var bag = (UserDefaults.standard.dictionary(forKey: personKey)) ?? [:]
+        for (k, v) in once where bag[k] == nil { bag[k] = v }
+        for (k, v) in props { bag[k] = v }
+        // `UserDefaults` refuses a non-plist value silently, so anything that
+        // cannot round-trip is dropped rather than corrupting the whole bag.
+        UserDefaults.standard.set(bag.filter { JSONSerialization.isValidJSONObject([$0.key: $0.value]) },
+                                  forKey: personKey)
+    }
+
+    private static func personProperties() -> [String: Any] {
+        UserDefaults.standard.dictionary(forKey: personKey) ?? [:]
+    }
+
     func refresh() {
         var comps = URLComponents(url: config.host.appendingPathComponent("flags"),
                                   resolvingAgainstBaseURL: false)
@@ -392,7 +420,26 @@ final class FlagsStore {
             URLQueryItem(name: "distinct_id", value: Session.distinctID()),
         ]
         guard let url = comps?.url else { return }
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+
+        // ── THE PROPERTIES TRAVEL, WHICH IS WHAT MAKES A COHORT HONEST ────────
+        //
+        // POST when there is anything to say, GET when there is not.
+        //
+        // ⚠️ STILL A GET ON AN EMPTY BAG, deliberately. A GET is cacheable and
+        // the overwhelming majority of installs have no cohort — making every
+        // flag call a POST to support a feature most customers do not use would
+        // put the cost on all of them. capture reads the body in preference to
+        // the query string, so the two shapes cannot disagree.
+        var request = URLRequest(url: url)
+        let bag = Self.personProperties()
+        if !bag.isEmpty, JSONSerialization.isValidJSONObject(bag),
+           let body = try? JSONSerialization.data(withJSONObject: bag) {
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = body
+        }
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
             guard let self, let data else { return }
             struct Body: Codable { let flags: [String: Flag]? }
             guard let body = try? JSONDecoder().decode(Body.self, from: data) else { return }

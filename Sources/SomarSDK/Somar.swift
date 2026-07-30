@@ -131,8 +131,15 @@ public enum Somar {
     /// Person profile properties: `props` overwrite ($set), `once` only fill
     /// keys the person does not already have ($set_once).
     public static func setPersonProperties(_ props: [String: Any], once: [String: Any] = [:]) {
-        enqueue("$set", ["$set": SomarContract.sanitise(props),
-                         "$set_once": SomarContract.sanitise(once)])
+        let set = SomarContract.sanitise(props)
+        let setOnce = SomarContract.sanitise(once)
+        enqueue("$set", ["$set": set, "$set_once": setOnce])
+        // ⚠️ THE SANITISED VERSIONS, so the bag sent to `/flags` is the bag the
+        // server will hold. Remembering the RAW arguments would let a `$`-prefixed
+        // key reach the flag call after `sanitise` had stripped it from the event
+        // — and capture strips them again on arrival, so the two would simply
+        // disagree about who this person is.
+        FlagsStore.rememberPersonProperties(set, once: setOnce)
     }
 
     /// Record something the person did.
@@ -171,6 +178,93 @@ public enum Somar {
         merged["$revenue"] = NSDecimalNumber(decimal: amount)
         if merged["currency"] == nil { merged["currency"] = "USD" }
         enqueue("purchase", merged)
+    }
+
+    /// One call to a model — what it cost, how fast it was, whether it failed.
+    ///
+    /// `sdk_ai_overview`, `sdk_ai_cost` and the six `sdk.ai.*` rollup metrics
+    /// have been live over `$ai_generation` events for months with **no way to
+    /// send one**: the `$` namespace is platform-only, so a hand-built
+    /// `capture("$ai_generation", ["$ai_model": …])` is refused by name and
+    /// stripped by property. A reader with no writer reads "—" forever.
+    ///
+    /// ⚠️ **`costUSD` IS OPTIONAL, AND PASSING NIL IS THE NORMAL CASE.** Leave
+    /// it out and `sdk_ai_cost()` prices the generation from the model and the
+    /// token counts, against prices that are data and get corrected after the
+    /// fact; an unknown model yields **null**, which the AI page reports as
+    /// `cost_unknown` rather than folding into a total it cannot back.
+    ///
+    /// So an unknown cost is **absent from the payload**, never `0` and never
+    /// `NSNull`. `sdk_ai_overview` branches on the KEY BEING PRESENT
+    /// (`props ? '$ai_cost_usd'`) and `sdk_numeric()` answers **0** for
+    /// anything non-numeric, so a null there is read as an exact $0.00 that
+    /// counts as PRICED and never reaches `cost_unknown`: every generation free,
+    /// the honesty field silent, the customer's AI spend zero. A `0` you *pass*
+    /// is kept — a cached or free-tier call really is free, and you said so.
+    public static func captureAIGeneration(
+        model: String,
+        inputTokens: Int,
+        outputTokens: Int,
+        costUSD: Decimal? = nil,
+        latencyMs: Int? = nil,
+        provider: String? = nil,
+        traceID: String? = nil,
+        isError: Bool? = nil,
+        _ props: [String: Any] = [:]
+    ) {
+        guard let payload = aiGenerationProps(
+            model: model, inputTokens: inputTokens, outputTokens: outputTokens,
+            costUSD: costUSD, latencyMs: latencyMs, provider: provider,
+            traceID: traceID, isError: isError, props) else { return }
+        enqueue("$ai_generation", payload)
+    }
+
+    /// The payload `captureAIGeneration` sends, or nil for a call that must not
+    /// be sent. Pure — it takes its inputs rather than reading global state, so
+    /// "an omitted cost is ABSENT, never 0" is a test rather than a comment.
+    static func aiGenerationProps(
+        model: String, inputTokens: Int, outputTokens: Int,
+        costUSD: Decimal? = nil, latencyMs: Int? = nil, provider: String? = nil,
+        traceID: String? = nil, isError: Bool? = nil, _ props: [String: Any] = [:]
+    ) -> [String: Any]? {
+        // Every figure on the AI page is keyed by model — the price lookup, the
+        // by_model breakdown, and the unpriced_models list that explains a gap.
+        // A generation with no model can never be priced and would enter that
+        // list as "", turning the one field that says "we could not price
+        // these" into a row nobody can act on. Warn once and send nothing, as
+        // capture() does for an empty name.
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedModel.isEmpty else {
+            SomarContract.warnOnce("ai:model", "captureAIGeneration() needs a model id — nothing was sent. Pass the id your provider named, e.g. model: \"gpt-4.1-mini\".")
+            return nil
+        }
+        // Same reasoning one step along: the token counts ARE the cost when no
+        // cost is passed, and sdk_ai_cost() prices 0 tokens on a known model at
+        // exactly $0.00 — a confident wrong number rather than a visible gap.
+        guard inputTokens >= 0, outputTokens >= 0 else {
+            SomarContract.warnOnce("ai:tokens", "captureAIGeneration(model: \"\(trimmedModel)\") was given a negative token count — nothing was sent, because a generation costed from it would read as free.")
+            return nil
+        }
+        // Customer props first, then ours: the $ai_* keys are added AFTER
+        // sanitisation so a props key can never spoof one (contract §4).
+        var merged = SomarContract.sanitise(props)
+        merged["$ai_model"] = trimmedModel
+        merged["$ai_input_tokens"] = inputTokens
+        merged["$ai_output_tokens"] = outputTokens
+        if let latencyMs, latencyMs >= 0 { merged["$ai_latency_ms"] = latencyMs }
+        if let provider = provider?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !provider.isEmpty { merged["$ai_provider"] = provider }
+        if let traceID = traceID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !traceID.isEmpty { merged["$ai_trace_id"] = traceID }
+        if let isError { merged["$ai_is_error"] = isError }
+        // The one property whose ABSENCE is meaningful — see the note above.
+        // A NaN Decimal is excluded for the JS suite's reason inverted: it would
+        // encode as a non-finite Double and fail JSONEncoder for the WHOLE
+        // event, so one bad cost would drop a generation that was otherwise fine.
+        if let costUSD, !costUSD.isNaN {
+            merged["$ai_cost_usd"] = NSDecimalNumber(decimal: costUSD)
+        }
+        return merged
     }
 
     /// Stops all capture on this device until optIn() is called. The preference

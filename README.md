@@ -23,6 +23,12 @@ Somar.screen("Onboarding")
 Somar.group("company", "acme-inc")
 Somar.captureError(error)
 
+// What your AI features cost. Leave costUSD off and Somar prices the
+// generation from the model and the token counts; pass it only when you know
+// it from your provider — an unknown cost is reported as unknown, never as $0.
+Somar.captureAIGeneration(model: "gpt-4.1-mini", inputTokens: 1_200,
+                          outputTokens: 340, latencyMs: 880)
+
 if Somar.isEnabled("new-onboarding") { /* … */ }
 
 Somar.reset()                                     // on logout
